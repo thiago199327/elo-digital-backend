@@ -1,5 +1,0 @@
-{
-  "deploy": {
-    "entrypoint": "./index.ts"
-  }
-}
