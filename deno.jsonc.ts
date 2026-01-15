@@ -1,5 +1,6 @@
 {
   "deploy": {
-    "entrypoint": "./server.ts"
-  }
+    "entrypoint": "./server.ts.txt"
+  },
+  "nodeModulesDir": "auto"
 }
