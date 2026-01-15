@@ -1,18 +1,25 @@
 import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
-import { jwtDecode } from "npm:jwt-decode";
 import * as kv from "./kv_store.tsx";
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const app = new Hono();
 
-// Create Supabase clients
+// Helper to get Supabase Client
+// CRITICAL: MUST use the URL and Key from Deno.env
 const getSupabaseAdmin = () => createClient(
   Deno.env.get('SUPABASE_URL') ?? '',
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
+  {
+      auth: {
+          autoRefreshToken: false,
+          persistSession: false
+      }
+  }
 );
 
+// Helper for anon client (used for auth mostly)
 const getSupabaseClient = () => createClient(
   Deno.env.get('SUPABASE_URL') ?? '',
   Deno.env.get('SUPABASE_ANON_KEY') ?? '',
@@ -26,7 +33,7 @@ app.use(
   "/*",
   cors({
     origin: "*",
-    allowHeaders: ["Content-Type", "Authorization"],
+    allowHeaders: ["Content-Type", "Authorization", "x-client-info"],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     exposeHeaders: ["Content-Length"],
     maxAge: 600,
@@ -34,29 +41,49 @@ app.use(
 );
 
 // Health check endpoint
-app.get("/elo-api-server/health", (c) => {
+app.get("/make-server-fa85f322/health", (c) => {
   return c.json({ status: "ok" });
 });
 
-// Helper function to get user ID from JWT
-const getUserIdFromAuth = (c) => {
-    const authHeader = c.req.header('Authorization');
-    if (!authHeader) return null;
-    const accessToken = authHeader.split(' ')[1];
-    if (!accessToken) return null;
+// Also support non-prefixed health check for easier debugging
+app.get("/health", (c) => {
+    return c.json({ status: "ok" });
+});
 
-    try {
-        const decoded = jwtDecode(accessToken);
-        return decoded.sub; // 'sub' field contains the user ID
-    } catch (e) {
-        console.error("Error decoding JWT:", e);
-        return null;
+// Helper function to get user ID from Supabase Auth
+const getUserIdFromAuth = async (c) => {
+  const authHeader = c.req.header('Authorization');
+  if (!authHeader) {
+      console.log("No Authorization header found");
+      return null;
+  }
+  
+  const token = authHeader.split(' ')[1];
+  if (!token) {
+      console.log("No token found in Authorization header");
+      return null;
+  }
+
+  try {
+    const supabase = getSupabaseClient();
+    // Validate the token against Supabase Auth
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    
+    if (error || !user) {
+      console.log("Auth error validating token:", error);
+      return null;
     }
+    return user.id;
+  } catch (e) {
+    console.error("Exception validating token:", e);
+    return null;
+  }
 };
 
 
 // Auth Routes
-app.post("/elo-api-server/auth/signup", async (c) => {
+// Support both prefixed and non-prefixed for robustness
+const handleSignup = async (c) => {
   try {
     const { email, password, name } = await c.req.json();
     
@@ -65,6 +92,8 @@ app.post("/elo-api-server/auth/signup", async (c) => {
     }
 
     const supabase = getSupabaseAdmin();
+    // Use admin to create user so we can confirm email immediately if desired
+    // Or allow normal signup. Code used admin previously.
     const { data, error } = await supabase.auth.admin.createUser({
       email,
       password,
@@ -77,6 +106,7 @@ app.post("/elo-api-server/auth/signup", async (c) => {
       return c.json({ error: error.message }, 400);
     }
 
+    // Initialize user profile in KV
     await kv.set(`user:${data.user.id}`, {
       id: data.user.id,
       email,
@@ -85,16 +115,40 @@ app.post("/elo-api-server/auth/signup", async (c) => {
       location: '',
       isPremium: false,
       memberSince: new Date().toISOString(),
+      // New profile fields default empty
+      bio: '',
+      job: '',
+      education: '',
+      height: '',
+      bodyType: '',
+      relationshipStatus: '',
+      religion: '',
+      languages: [],
+      interests: [],
+      habits: [],
+      idealMatch: '',
+      nonNegotiables: [],
+      // AI Defaults
+      aiCompanionName: 'Meu Elo',
+      aiCompanionPersonality: 'amoroso',
+      aiCompanionAvatar: '🤖',
+      aiTraits: { formality: 50, humor: 50, proactivity: 50 },
+      aiMemory: 'medium',
+      aiTopics: []
     });
 
     return c.json({ user: data.user });
   } catch (error) {
-    console.log('Signup error:', error);
-    return c.json({ error: 'Erro ao criar conta' }, 500);
+    console.log('Signup exception:', error);
+    return c.json({ error: 'Erro ao criar conta: ' + error.message }, 500);
   }
-});
+};
 
-app.post("/elo-api-server/auth/signin", async (c) => {
+app.post("/make-server-fa85f322/auth/signup", handleSignup);
+app.post("/auth/signup", handleSignup);
+
+
+const handleSignin = async (c) => {
   try {
     const { email, password } = await c.req.json();
     
@@ -118,15 +172,18 @@ app.post("/elo-api-server/auth/signin", async (c) => {
       user: data.user 
     });
   } catch (error) {
-    console.log('Signin error:', error);
+    console.log('Signin exception:', error);
     return c.json({ error: 'Erro ao fazer login' }, 500);
   }
-});
+};
+
+app.post("/make-server-fa85f322/auth/signin", handleSignin);
+app.post("/auth/signin", handleSignin);
 
 // Get current user profile
-app.get("/elo-api-server/profile", async (c) => {
+const handleGetProfile = async (c) => {
   try {
-    const userId = getUserIdFromAuth(c);
+    const userId = await getUserIdFromAuth(c);
     if (!userId) {
         return c.json({ error: 'Não autorizado' }, 401);
     }
@@ -137,12 +194,16 @@ app.get("/elo-api-server/profile", async (c) => {
     console.log('Get profile error:', error);
     return c.json({ error: 'Erro ao buscar perfil' }, 500);
   }
-});
+};
+
+app.get("/make-server-fa85f322/profile", handleGetProfile);
+app.get("/profile", handleGetProfile);
+
 
 // Update user profile
-app.put("/elo-api-server/profile", async (c) => {
+const handleUpdateProfile = async (c) => {
   try {
-    const userId = getUserIdFromAuth(c);
+    const userId = await getUserIdFromAuth(c);
     if (!userId) {
         return c.json({ error: 'Não autorizado' }, 401);
     }
@@ -157,37 +218,20 @@ app.put("/elo-api-server/profile", async (c) => {
     console.log('Update profile error:', error);
     return c.json({ error: 'Erro ao atualizar perfil' }, 500);
   }
-});
+};
 
-// Rota para atualizar as configurações do AI
-app.put("/elo-api-server/profile/ai-config", async (c) => {
-    try {
-        const userId = getUserIdFromAuth(c);
-        if (!userId) {
-            return c.json({ error: 'Não autorizado' }, 401);
-        }
+app.put("/make-server-fa85f322/profile", handleUpdateProfile);
+app.put("/profile", handleUpdateProfile);
 
-        const configUpdates = await c.req.json();
-        const currentProfile = await kv.get(`user:${userId}`) || {};
-        const updatedProfile = { 
-            ...currentProfile, 
-            ...configUpdates,
-            id: userId 
-        }; 
-        
-        await kv.set(`user:${userId}`, updatedProfile);
-        return c.json({ profile: updatedProfile });
-    } catch (error) {
-        console.log('Update AI config error:', error);
-        return c.json({ error: 'Erro ao atualizar configurações do AI' }, 500);
-    }
-});
+// AI Config Route (legacy support, but useful)
+app.put("/make-server-fa85f322/profile/ai-config", handleUpdateProfile);
+app.put("/profile/ai-config", handleUpdateProfile);
 
 
 // Messages Routes
-app.post("/elo-api-server/messages", async (c) => {
+const handleSendMessage = async (c) => {
   try {
-    const userId = getUserIdFromAuth(c);
+    const userId = await getUserIdFromAuth(c);
     if (!userId) {
         return c.json({ error: 'Não autorizado' }, 401);
     }
@@ -211,6 +255,7 @@ app.post("/elo-api-server/messages", async (c) => {
     });
 
     if (receiver === 'ai-companion') {
+      // Simulate AI response delay
       setTimeout(async () => {
         const aiResponses = [
           "Fico feliz em conversar com você! Como está se sentindo hoje?",
@@ -244,11 +289,15 @@ app.post("/elo-api-server/messages", async (c) => {
     console.log('Send message error:', error);
     return c.json({ error: 'Erro ao enviar mensagem' }, 500);
   }
-});
+};
 
-app.get("/elo-api-server/messages/:conversationId", async (c) => {
+app.post("/make-server-fa85f322/messages", handleSendMessage);
+app.post("/messages", handleSendMessage);
+
+
+const handleGetMessages = async (c) => {
   try {
-    const userId = getUserIdFromAuth(c);
+    const userId = await getUserIdFromAuth(c);
     if (!userId) {
         return c.json({ error: 'Não autorizado' }, 401);
     }
@@ -265,12 +314,16 @@ app.get("/elo-api-server/messages/:conversationId", async (c) => {
     console.log('Get messages error:', error);
     return c.json({ error: 'Erro ao buscar mensagens' }, 500);
   }
-});
+};
+
+app.get("/make-server-fa85f322/messages/:conversationId", handleGetMessages);
+app.get("/messages/:conversationId", handleGetMessages);
+
 
 // Conversations Routes
-app.get("/elo-api-server/conversations", async (c) => {
+const handleGetConversations = async (c) => {
   try {
-    const userId = getUserIdFromAuth(c);
+    const userId = await getUserIdFromAuth(c);
     if (!userId) {
         return c.json({ error: 'Não autorizado' }, 401);
     }
@@ -286,8 +339,10 @@ app.get("/elo-api-server/conversations", async (c) => {
     console.log('Get conversations error:', error);
     return c.json({ error: 'Erro ao buscar conversas' }, 500);
   }
-});
+};
+
+app.get("/make-server-fa85f322/conversations", handleGetConversations);
+app.get("/conversations", handleGetConversations);
 
 
-// Make sure your Hono app is exported correctly at the very end.
 Deno.serve(app.fetch);
