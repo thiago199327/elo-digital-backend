@@ -2,10 +2,10 @@
   "name": "@figma/my-make-file",
   "private": true,
   "version": "0.0.1",
-  "type": "module",
-  "scripts": {
-    "build": "vite build",
-    "dev": "vite"
+  "type": "module","scripts": {
+  "start": "node index.js",
+  "dev": "node --watch index.js"
+}
   },
   "dependencies": {
     "@emotion/react": "11.14.0",
